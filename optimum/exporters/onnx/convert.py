@@ -90,6 +90,7 @@ def validate_models_outputs(
     device: str = "cpu",
     use_subprocess: Optional[bool] = True,
     model_kwargs: Optional[Dict[str, Any]] = None,
+    nativert=False,
 ):
     """
     Validates the export of several models, by checking that the outputs from both the reference and the exported model match.
@@ -153,6 +154,7 @@ def validate_models_outputs(
                 device=device,
                 use_subprocess=use_subprocess,
                 model_kwargs=model_kwargs,
+                nativert=nativert,
             )
         except Exception as e:
             exceptions.append((onnx_model_path, e))
@@ -173,6 +175,7 @@ def validate_model_outputs(
     device: str = "cpu",
     use_subprocess: Optional[bool] = True,
     model_kwargs: Optional[Dict[str, Any]] = None,
+    nativert=False,
 ):
     """
     Validates the export by checking that the outputs from both the reference and the exported model match.
@@ -222,6 +225,7 @@ def validate_model_outputs(
             input_shapes,
             device,
             model_kwargs=model_kwargs,
+            nativert=nativert,
         )
 
 
@@ -234,6 +238,7 @@ def _run_validation(
     input_shapes: Optional[Dict] = None,
     device: str = "cpu",
     model_kwargs: Optional[Dict[str, Any]] = None,
+    nativert=False,
 ):
     from onnxruntime import GraphOptimizationLevel, SessionOptions
 
@@ -347,6 +352,45 @@ def _run_validation(
             onnx_inputs.update({tensor_name: pt_tensor.cpu().numpy() for tensor_name, pt_tensor in value.items()})
         else:
             onnx_inputs[name] = value.cpu().numpy()
+
+    if nativert:
+        ep_model = onnx_model.as_posix().replace(".onnx", ".pt2")
+        from torch._C.nativert import PyPlacement, PyRuntimeConfigs, PyExecutorType, PyModelRunner
+        device = torch.device("cpu")
+        placement = PyPlacement(device)
+
+        runtime_configs = PyRuntimeConfigs()
+        import torch.utils._pytree as pytree
+
+        ep_inputs = pytree.tree_leaves(copy.deepcopy(copy_reference_model_inputs))
+
+        if os.path.exists(ep_model):
+            dummy_inputs = torch.load(ep_model + ".inputs")
+            if len(ep_inputs) < len(dummy_inputs):
+                # TODO optimum and onnx don't use the same input shapes.
+                #      e.g. export time: t0, t1, None, None
+                #           test time:   t2, t3
+                for i in range(len(ep_inputs), len(dummy_inputs)):
+                    assert dummy_inputs[i] is None
+                    ep_inputs.append(None)
+
+            # TODO Sometimes optimum will do post_process_exported_models
+            # which produce new .onnx files. We should skip these.
+            model_runner = PyModelRunner(
+                ep_model,
+                "model",
+                PyExecutorType.INTERPRETER,
+                runtime_configs,
+                placement,
+            )
+            # with torch.inference_mode():
+            results = model_runner.run_with_flat_inputs_and_outputs(*ep_inputs)
+
+            for out, ref in zip(pytree.tree_leaves(results), pytree.tree_leaves(ref_outputs_dict)):
+                assert out.dtype == ref.dtype
+                assert out.shape == ref.shape
+                assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+
 
     # Compute outputs from the ONNX model
     onnx_outputs = session.run(onnx_named_outputs, onnx_inputs)
@@ -472,6 +516,7 @@ def export_pytorch(
     no_dynamic_axes: bool = False,
     do_constant_folding: bool = True,
     model_kwargs: Optional[Dict[str, Any]] = None,
+    nativert=False,
 ) -> Tuple[List[str], List[str]]:
     """
     Exports a PyTorch model to an ONNX Intermediate Representation.
@@ -560,6 +605,27 @@ def export_pytorch(
             else:
                 dynamix_axes = dict(chain(inputs.items(), config.outputs.items()))
 
+            if nativert:
+                # assert dynamix_axes is not None
+                assert isinstance(dummy_inputs, dict)
+                ep = torch.export.export(
+                    model,
+                    (),
+                    dummy_inputs,
+                    strict=False,
+                )
+                ep = ep.run_decompositions()
+                ep_path = output.as_posix().replace(".onnx", ".pt2")
+                import torch.utils._pytree as pytree
+                torch.save(pytree.tree_leaves(dummy_inputs), ep_path + ".inputs")
+                from torch.export.experimental.package import PT2ArchiveWriter, package_model
+                with open(ep_path, "wb") as f:
+                    with PT2ArchiveWriter(f) as archive_writer:
+                        package_model(
+                            ep,
+                            "model",
+                            archive_writer
+                        )
             # Export can work with named args but the dict containing named args has to be the last element of the args
             # tuple.
             onnx_export(
@@ -705,6 +771,7 @@ def export_models(
     no_dynamic_axes: bool = False,
     do_constant_folding: bool = True,
     model_kwargs: Optional[Dict[str, Any]] = None,
+    nativert=False,
 ) -> Tuple[List[List[str]], List[List[str]]]:
     """
     Exports a Pytorch or TensorFlow encoder decoder model to an ONNX Intermediate Representation.
@@ -773,6 +840,7 @@ def export_models(
                 no_dynamic_axes=no_dynamic_axes,
                 do_constant_folding=do_constant_folding,
                 model_kwargs=model_kwargs,
+                nativert=nativert,
             )
         )
 
@@ -792,6 +860,7 @@ def export(
     no_dynamic_axes: bool = False,
     do_constant_folding: bool = True,
     model_kwargs: Optional[Dict[str, Any]] = None,
+    nativert=False,
 ) -> Tuple[List[str], List[str]]:
     """
     Exports a Pytorch or TensorFlow model to an ONNX Intermediate Representation.
@@ -875,6 +944,7 @@ def export(
             no_dynamic_axes=no_dynamic_axes,
             do_constant_folding=do_constant_folding,
             model_kwargs=model_kwargs,
+            nativert=nativert,
         )
 
     elif is_tf_available() and issubclass(type(model), TFPreTrainedModel):
@@ -918,6 +988,7 @@ def onnx_export_from_model(
     task: Optional[str] = None,
     use_subprocess: bool = False,
     do_constant_folding: bool = True,
+    nativert=False,
     **kwargs_shapes,
 ):
     """
@@ -1185,6 +1256,7 @@ def onnx_export_from_model(
         no_dynamic_axes=no_dynamic_axes,
         do_constant_folding=do_constant_folding,
         model_kwargs=model_kwargs,
+        nativert=nativert,
     )
 
     if optimize is not None:
@@ -1234,6 +1306,7 @@ def onnx_export_from_model(
                 device=device,
                 use_subprocess=use_subprocess,
                 model_kwargs=model_kwargs,
+                nativert=nativert,
             )
             logger.info(f"The ONNX export succeeded and the exported model was saved at: {output.as_posix()}")
         except ShapeError as e:
@@ -1245,8 +1318,4 @@ def onnx_export_from_model(
         except OutputMatchError as e:
             logger.warning(
                 f"The ONNX export succeeded with the warning: {e}.\n The exported model was saved at: {output.as_posix()}"
-            )
-        except Exception as e:
-            raise Exception(
-                f"An error occured during validation, but the model was saved nonetheless at {output.as_posix()}. Detailed error: {e}."
             )

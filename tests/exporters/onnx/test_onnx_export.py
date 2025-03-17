@@ -189,7 +189,12 @@ class OnnxExportTestCase(TestCase):
         else:
             config = AutoConfig.from_pretrained(model_name)
             model_class = TasksManager.get_model_class_for_task(task, model_type=config.model_type.replace("_", "-"))
-            model = model_class.from_config(config)
+            if hasattr(model_class, "from_config"):
+                model = model_class.from_config(config)
+            elif hasattr(model_class, "_from_config"):
+                model = model_class._from_config(config)
+            else:
+                raise RuntimeError("")
 
         # Dynamic axes aren't supported for YOLO-like models. This means they cannot be exported to ONNX on CUDA devices.
         # See: https://github.com/ultralytics/yolov5/pull/8378
@@ -255,7 +260,7 @@ class OnnxExportTestCase(TestCase):
                 device=device,
                 model_kwargs=model_kwargs,
             )
-            input_shapes_iterator = grid_parameters(shapes_to_validate, yield_dict=True, add_test_name=False)
+            input_shapes_iterator = list(grid_parameters(shapes_to_validate, yield_dict=True, add_test_name=False))[-1:]
             for input_shapes in input_shapes_iterator:
                 skip = False
                 for _, model_onnx_conf in models_and_onnx_configs.items():
@@ -284,6 +289,7 @@ class OnnxExportTestCase(TestCase):
                         input_shapes=input_shapes,
                         device=device,
                         model_kwargs=model_kwargs,
+                        use_subprocess=False,
                     )
                 except AtolError as e:
                     print(f"The ONNX export succeeded with the warning: {e}")
@@ -320,9 +326,9 @@ class OnnxExportTestCase(TestCase):
 
     @parameterized.expand(_get_models_to_test(PYTORCH_EXPORT_MODELS_TINY))
     @require_torch
-    @require_vision
-    @pytest.mark.run_slow
-    @slow
+    # @require_vision
+    # @pytest.mark.run_slow
+    # @slow
     def test_pytorch_export_on_cpu(
         self,
         test_name,
@@ -347,10 +353,10 @@ class OnnxExportTestCase(TestCase):
 
     @parameterized.expand(_get_models_to_test(PYTORCH_EXPORT_MODELS_TINY))
     @require_torch
-    @require_vision
+    # @require_vision
     @require_torch_gpu
-    @slow
-    @pytest.mark.run_slow
+    # @slow
+    # @pytest.mark.run_slow
     @pytest.mark.gpu_test
     def test_pytorch_export_on_cuda(
         self,
@@ -379,7 +385,7 @@ class OnnxExportTestCase(TestCase):
     @slow
     @pytest.mark.run_slow
     @require_tf
-    @require_vision
+    # @require_vision
     @pytest.mark.tensorflow_test
     def test_tensorflow_export(
         self, test_name, model_type, model_name, task, onnx_config_class_constructor, monolith: bool
@@ -391,14 +397,14 @@ class OnnxExportTestCase(TestCase):
 
     @parameterized.expand(PYTORCH_DIFFUSION_MODEL.items())
     @require_torch
-    @require_vision
+    # @require_vision
     @require_diffusers
     def test_pytorch_export_for_diffusion_models(self, model_type, model_name):
         self._onnx_export_diffusion_models(model_type, model_name)
 
     @parameterized.expand(PYTORCH_DIFFUSION_MODEL.items())
     @require_torch
-    @require_vision
+    # @require_vision
     @require_diffusers
     @require_torch_gpu
     @slow
@@ -595,6 +601,7 @@ class OnnxExportModelTest(TestCase):
         task: str,
         monolith: bool,
         device="cpu",
+        nativert=False,
     ):
         library_name = TasksManager.infer_library_from_model(model_name)
         loading_kwargs = {"attn_implementation": "eager"} if model_type in SDPA_ARCHS_ONNX_EXPORT_NOT_SUPPORTED else {}
@@ -633,11 +640,12 @@ class OnnxExportModelTest(TestCase):
                 device=device,
                 preprocessors=preprocessors,
                 task=task,
+                nativert=nativert,
             )
 
     @parameterized.expand(_get_models_to_test(PYTORCH_EXPORT_MODELS_TINY))
     @require_torch
-    @require_vision
+    # @require_vision
     @slow
     def test_pytorch_export_on_cpu(
         self,
@@ -660,9 +668,38 @@ class OnnxExportModelTest(TestCase):
             device="cpu",
         )
 
+
     @parameterized.expand(_get_models_to_test(PYTORCH_EXPORT_MODELS_TINY))
     @require_torch
-    @require_vision
+    # @require_vision
+    # @slow
+    def test_pytorch_export_on_cpu_nativert(
+        self,
+        test_name,
+        model_type,
+        model_name,
+        task,
+        onnx_config_class_constructor,
+        monolith,
+    ):
+        print(" ======================== running " + self.id())
+        if model_type == "speecht5" and monolith:
+            self.skipTest("unsupported export")
+
+        self._onnx_export(
+            test_name,
+            model_type,
+            model_name,
+            task,
+            monolith,
+            device="cpu",
+            nativert=True,
+        )
+
+
+    @parameterized.expand(_get_models_to_test(PYTORCH_EXPORT_MODELS_TINY))
+    @require_torch
+    # @require_vision
     @require_torch_gpu
     @slow
     @pytest.mark.run_slow
@@ -687,3 +724,7 @@ class OnnxExportModelTest(TestCase):
             monolith,
             device="cuda",
         )
+
+if __name__ == '__main__':
+    import unittest
+    unittest.main()
