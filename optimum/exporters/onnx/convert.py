@@ -14,6 +14,7 @@
 # limitations under the License.
 """ONNX model check and export functions."""
 
+import collections
 import copy
 import gc
 import multiprocessing as mp
@@ -606,17 +607,23 @@ def export_pytorch(
                 dynamix_axes = dict(chain(inputs.items(), config.outputs.items()))
 
             if nativert:
+                import torch.utils._pytree as pytree
+                def convert_to_spec(x: torch.Tensor):
+                    assert isinstance(x, torch.Tensor)
+                    return {ix: torch.export.Dim.AUTO for ix in range(len(x.shape))}
+
+                dynamic_specs = pytree.tree_map_only(torch.Tensor, lambda x: convert_to_spec(x), dummy_inputs)
                 # assert dynamix_axes is not None
                 assert isinstance(dummy_inputs, dict)
                 ep = torch.export.export(
                     model,
                     (),
                     dummy_inputs,
+                    dynamic_shapes=dynamic_specs,
                     strict=False,
                 )
                 ep = ep.run_decompositions()
                 ep_path = output.as_posix().replace(".onnx", ".pt2")
-                import torch.utils._pytree as pytree
                 torch.save(pytree.tree_leaves(dummy_inputs), ep_path + ".inputs")
                 from torch.export.experimental.package import PT2ArchiveWriter, package_model
                 with open(ep_path, "wb") as f:
